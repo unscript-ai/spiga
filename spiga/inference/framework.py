@@ -68,7 +68,7 @@ class SPIGAFramework:
         outputs = self.net_forward(batch_crops)
         features = self.postreatment(outputs, crop_bboxes, bboxes)
         return features
-
+    
     def pretreat(self, image, bboxes):
         crop_bboxes = []
         crop_images = []
@@ -91,7 +91,8 @@ class SPIGAFramework:
         return model_inputs, crop_bboxes
 
     def net_forward(self, inputs):
-        outputs = self.model(inputs)
+        with torch.no_grad():
+            outputs = self.model(inputs)
         return outputs
 
     def postreatment(self, output, crop_bboxes, bboxes):
@@ -114,6 +115,54 @@ class SPIGAFramework:
             features['headpose'] = pose.tolist()
 
         return features
+    
+    def batch_pretreat(self, images, bboxes):
+        crop_bboxes = []
+        crop_images = []
+
+        # for bbox in bboxes:
+        for i in range(len(images)):
+            sample = {'image': copy.deepcopy(images[i]),
+                        'bbox': copy.deepcopy(bboxes[i])}
+            sample_crop = self.transforms(sample)
+            crop_bboxes.append(sample_crop['bbox'])
+            crop_images.append(sample_crop['image'])
+
+        # Images to tensor and device
+        batch_images = torch.tensor(np.array(crop_images), dtype=torch.float)
+        batch_images = self._data2device(batch_images)
+        # Batch 3D model and camera intrinsic matrix
+        batch_model3D = self.model3d.unsqueeze(0).repeat(len(bboxes), 1, 1)
+        batch_cam_matrix = self.cam_matrix.unsqueeze(0).repeat(len(bboxes), 1, 1)
+
+        # SPIGA inputs
+        model_inputs = [batch_images, batch_model3D, batch_cam_matrix]
+        return model_inputs, crop_bboxes
+
+    def batch_inference(self, images, bboxes):
+        batch_crops, crop_boxes = self.batch_pretreat(images, bboxes)
+        outputs = self.net_forward(batch_crops)
+        
+        # for i in range(len(images)):
+        features = self.batch_postreatment(outputs, crop_boxes, bboxes)
+        return features
+    
+    def batch_postreatment(self, output, crop_bboxes, bboxes):
+        landmarks_list = []
+        crop_bboxes = np.array(crop_bboxes)
+        bboxes = np.array(bboxes)
+
+        if 'Landmarks' in output.keys():
+            # breakpoint()
+            landmarks = output['Landmarks'][-1].cpu().detach().numpy()
+            landmarks = landmarks.transpose((1, 0, 2))
+            landmarks = landmarks*self.model_cfg.image_size
+            landmarks_norm = (landmarks - crop_bboxes[:, 0:2]) / crop_bboxes[:, 2:4]
+            landmarks_out = (landmarks_norm * bboxes[:, 2:4]) + bboxes[:, 0:2]
+            landmarks_out = landmarks_out.transpose((1, 0, 2))
+            return landmarks_out
+
+        return np.array(landmarks_list)
 
     def select_inputs(self, batch):
         inputs = []
